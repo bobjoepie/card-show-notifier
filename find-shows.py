@@ -9,6 +9,7 @@ import sys
 # 1. Configuration & Secrets
 WEBHOOKS = [url.strip() for url in os.getenv("DISCORD_WEBHOOKS", "").split(",") if url.strip()]
 STATES = [s.strip() for s in os.getenv("TARGET_STATES", "VA").split(",") if s.strip()]
+# CHANGED: Now splitting by Pipe (|) to allow commas inside addresses
 TEAM_ADDRESSES = [a.strip() for a in os.getenv("TEAM_ADDRESSES", "").split("|") if a.strip()]
 SEEN_FILE = "seen_ids.txt"
 MAX_TRAVEL_TIME = 7200 # 2 hours in seconds
@@ -45,6 +46,7 @@ team_coords = []
 for addr in TEAM_ADDRESSES:
     coords = get_coords(addr)
     if not coords:
+        # If this fails, it prints exactly what it tried to find
         print(f"❌ CRITICAL: Could not find your address: {addr}")
         sys.exit(1)
     team_coords.append(coords)
@@ -85,12 +87,10 @@ for state in STATES:
                     show_date = p_tags[0].get_text(strip=True)
                     show_address = p_tags[1].get_text(separator=" ", strip=True)
 
-                    # Quick Zip Code Check to confirm p[1] is actually the address
                     if re.search(r'\b\d{5}\b', show_address):
                         show_coords = get_coords(show_address)
                         
                         if show_coords:
-                            # Distance check
                             in_range = any(get_travel_time(tc, show_coords) <= MAX_TRAVEL_TIME for tc in team_coords)
                             
                             if in_range:
@@ -99,16 +99,15 @@ for state in STATES:
                                     requests.post(wh, json={"content": msg})
                                 print(f"✅ Notified for {show_id}")
                             else:
-                                print(f"⏭️ {show_id} is outside the 2-hour range.")
+                                print(f"⏭️ {show_id} is outside range.")
                         else:
                             print(f"🛑 Geocoder failed on show {show_id}")
-                            sys.exit(1) # Stop so we can see the failed address in logs
+                            sys.exit(1)
                     
-                    # Mark as seen
                     with open(SEEN_FILE, "a") as f:
                         f.write(f"{show_id}\n")
                     seen_ids.add(show_id)
-                    time.sleep(2) # Be kind to the server
+                    time.sleep(2)
 
     except Exception as e:
         print(f"Error on {state}: {e}")
