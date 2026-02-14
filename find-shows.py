@@ -73,17 +73,18 @@ for state in STATES:
                     detail_res = scraper.get(show_url)
                     detail_soup = BeautifulSoup(detail_res.text, 'html.parser')
                     
-                    # --- Robust Address Parsing ---
+                    # --- Precision Address Parsing for TCDB ---
                     show_address = ""
-                    # Look for strings in the main content area
-                    content_strings = list(detail_soup.stripped_strings)
+                    # The address is usually in a <p> tag that contains the zip code.
+                    all_p_tags = detail_soup.find_all('p')
                     
-                    for i, text in enumerate(content_strings):
-                        # Pattern: Find a line with a Zip Code (5 digits, often end of address)
+                    for p in all_p_tags:
+                        text = p.get_text(separator=" ", strip=True)
+                        # Look for the zip code pattern (5 digits)
                         if re.search(r'\b\d{5}\b', text):
-                            # The address is usually the Zip line + the 1-2 lines before it (Venue/Street)
-                            parts = content_strings[max(0, i-2) : i+1]
-                            show_address = ", ".join(parts)
+                            # Clean up: Remove country and unnecessary whitespace
+                            clean_address = text.replace("United States", "").strip()
+                            show_address = clean_address
                             break
                     
                     if show_address:
