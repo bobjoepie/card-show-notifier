@@ -16,17 +16,34 @@ MAX_TRAVEL_TIME = 7200 # 2 hours in seconds
 
 scraper = cloudscraper.create_scraper()
 
+import urllib.parse
+
 def get_coords(address):
-    """Converts text address to Lat/Lon. Removes 'United States' for better API matching."""
-    clean_addr = address.replace("United States", "").strip().replace("\n", " ")
+    """Converts text address to Lat/Lon with strict encoding."""
+    # Clean the address of any hidden newlines or tabs
+    clean_addr = address.replace("United States", "").strip().replace("\n", " ").replace("\r", "")
+    
+    # URL encode the address (turns spaces into %20, etc.)
+    encoded_addr = urllib.parse.quote(clean_addr)
+    
     try:
-        url = f"https://nominatim.openstreetmap.org/search?q={clean_addr}&format=json&limit=1"
-        res = requests.get(url, headers={'User-Agent': 'CardShowBot/1.0'}, timeout=10).json()
+        url = f"https://nominatim.openstreetmap.org/search?q={encoded_addr}&format=json&limit=1"
+        
+        # Use a very specific User-Agent as required by Nominatim's Policy
+        headers = {
+            'User-Agent': 'CardShowBot/1.0 (contact: your-github-username)' 
+        }
+        
+        res = requests.get(url, headers=headers, timeout=10).json()
+        
         if res:
+            print(f"✅ Found Coords for: {clean_addr}")
             return (res[0]['lon'], res[0]['lat'])
-        return None
+        else:
+            print(f"⚠️ Map API returned no results for: [{clean_addr}]")
+            return None
     except Exception as e:
-        print(f"Geocoding error: {e}")
+        print(f"❌ Geocoding error: {e}")
         return None
 
 def get_travel_time(start_coords, end_coords):
