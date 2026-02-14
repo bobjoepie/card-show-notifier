@@ -180,7 +180,7 @@ def geocode(address, quiet=False):
             if quiet:
                 print(f"    📍 Geocoded successfully")
             else:
-                print(f"    📍 Geocoded: {attempt}  →  ({coords[1]:.4f}, {coords[0]:.4f})")
+                print(f"    📍 Geocoded successfully")
             return coords
         time.sleep(NOMINATIM_DELAY)
 
@@ -373,8 +373,8 @@ def main():
     print("  Card Show Finder")
     print("=" * 60)
     print(f"  States       : {', '.join(states)}")
-    print(f"  Team members : {len(team_members)}")
-    print(f"  Webhooks     : {len(webhooks)}")
+    print(f"  Team members : configured")
+    print(f"  Webhooks     : configured")
     print()
 
     if not webhooks:
@@ -387,8 +387,7 @@ def main():
     print("📍 Geocoding team member addresses …")
     team_coords = []   # list of (coords, max_seconds)
     for addr, max_secs in team_members:
-        max_mins = max_secs / 60
-        print(f"  → {_mask_address(addr)} (max {max_mins:g} min)")
+        print(f"  → [member {len(team_coords) + 1}]")
         coords = geocode(addr, quiet=True)
         if coords:
             team_coords.append((coords, max_secs))
@@ -399,7 +398,7 @@ def main():
     if not team_coords:
         print("❌ CRITICAL: No team addresses could be geocoded. Exiting.")
         sys.exit(1)
-    print(f"  ✅ {len(team_coords)}/{len(team_members)} addresses geocoded\n")
+    print(f"  ✅ All team addresses geocoded\n")
 
     # ── load seen IDs ──
     seen_ids = set(_read_txt(SEEN_FILE))
@@ -456,7 +455,7 @@ def main():
                 continue
 
             show["address"] = address
-            print(f"     📍 {address}")
+            print(f"     📍 Address found")
 
             # ── geocode show venue ──
             time.sleep(NOMINATIM_DELAY)
@@ -479,7 +478,7 @@ def main():
             if in_range:
                 hrs = best_drive / 3600
                 show["drive_time_str"] = f"~{hrs:.1f} hrs"
-                print(f"     ✅ WITHIN RANGE — {show['drive_time_str']}")
+                print(f"     ✅ WITHIN RANGE")
                 new_alerts += 1
                 if webhooks:
                     send_discord_alert(webhooks, show)
@@ -487,7 +486,7 @@ def main():
                 if best_drive == float("inf"):
                     print("     ⏭️  Could not calculate drive time")
                 else:
-                    print(f"     ⏭️  Out of range ({best_drive/3600:.1f} hrs)")
+                    print(f"     ⏭️  Out of range")
 
     # ── summary ──
     print(f"\n{'='*60}")
