@@ -32,20 +32,22 @@ except ImportError:
     cloudscraper = None
 
 # ── constants ────────────────────────────────────────────────
-SEEN_FILE = "seen_ids.txt"
+SEEN_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "seen_ids.txt")
 MAX_TRAVEL_SECONDS = 7200          # 2 hours
 REQUEST_DELAY = 2                  # polite delay between TCDB page loads
 NOMINATIM_DELAY = 1.1              # Nominatim ToS: max 1 req/s
 USER_AGENT = "CardShowBot/1.0 (github-action-card-show-finder)"
 BASE_URL = "https://www.tcdb.com"
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 # ── configuration ────────────────────────────────────────────
 def _read_txt(filename):
-    """Return non-blank stripped lines from a text file."""
-    if not os.path.exists(filename):
+    """Return non-blank stripped lines from a text file (resolved relative to script dir)."""
+    filepath = os.path.join(SCRIPT_DIR, filename)
+    if not os.path.exists(filepath):
         return []
-    with open(filename, encoding="utf-8") as f:
+    with open(filepath, encoding="utf-8") as f:
         return [line.strip() for line in f if line.strip()]
 
 
@@ -56,27 +58,21 @@ def load_config():
     """
     # Discord webhooks — env var is comma-separated
     wh_env = os.getenv("DISCORD_WEBHOOKS", "").strip()
-    webhooks = (
-        [u.strip() for u in wh_env.split(",") if u.strip()]
-        if wh_env
-        else _read_txt("DISCORD_WEBHOOK.txt")
-    )
+    webhooks = [u.strip() for u in wh_env.split(",") if u.strip()] if wh_env else []
+    if not webhooks:
+        webhooks = _read_txt("DISCORD_WEBHOOK.txt")
 
     # Target states — env var is comma-separated (e.g. "VA,MD,DC")
     st_env = os.getenv("TARGET_STATES", "").strip()
-    states = (
-        [s.strip() for s in st_env.split(",") if s.strip()]
-        if st_env
-        else _read_txt("TARGET_STATES.txt")
-    ) or ["VA"]
+    states = [s.strip() for s in st_env.split(",") if s.strip()] if st_env else []
+    if not states:
+        states = _read_txt("TARGET_STATES.txt") or ["VA"]
 
     # Team addresses — env var is pipe-separated, txt is one per line
     ta_env = os.getenv("TEAM_ADDRESSES", "").strip()
-    addresses = (
-        [a.strip() for a in ta_env.split("|") if a.strip()]
-        if ta_env
-        else _read_txt("TEAM_ADDRESSES.txt")
-    )
+    addresses = [a.strip() for a in ta_env.split("|") if a.strip()] if ta_env else []
+    if not addresses:
+        addresses = _read_txt("TEAM_ADDRESSES.txt")
 
     return webhooks, states, addresses
 
