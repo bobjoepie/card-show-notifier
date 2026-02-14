@@ -1,6 +1,9 @@
 """
 Card Show Finder — scrapes TCDB for upcoming card shows, checks driving
-distance from team member addresses, and pings Discord if within 2 hours.
+distance from team member addresses, and pings Discord if within range.
+
+Each team member can set their own max drive time (default 120 min).
+Format: "address;minutes" — e.g. "Sterling, VA;120" or "Manassas, VA;60"
 
 Local mode  : reads DISCORD_WEBHOOK.txt, TARGET_STATES.txt, TEAM_ADDRESSES.txt
 GitHub Actions: reads from repository secrets via env vars
@@ -33,7 +36,7 @@ except ImportError:
 
 # ── constants ────────────────────────────────────────────────
 SEEN_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "seen_ids.txt")
-MAX_TRAVEL_SECONDS = 7200          # 2 hours
+DEFAULT_MAX_MINUTES = 120          # used when no ;minutes suffix given
 REQUEST_DELAY = 2                  # polite delay between TCDB page loads
 NOMINATIM_DELAY = 1.1              # Nominatim ToS: max 1 req/s
 USER_AGENT = "CardShowBot/1.0 (github-action-card-show-finder)"
@@ -49,6 +52,18 @@ def _read_txt(filename):
         return []
     with open(filepath, encoding="utf-8") as f:
         return [line.strip() for line in f if line.strip()]
+
+
+def _parse_team_entry(entry):
+    """Parse 'address;minutes' → (address, max_seconds).  Minutes is optional."""
+    if ";" in entry:
+        addr_part, mins_part = entry.rsplit(";", 1)
+        try:
+            max_mins = float(mins_part.strip())
+        except ValueError:
+            max_mins = DEFAULT_MAX_MINUTES
+        return addr_part.strip(), max_mins * 60
+    return entry.strip(), DEFAULT_MAX_MINUTES * 60
 
 
 def load_config():
@@ -69,18 +84,20 @@ def load_config():
         states = _read_txt("TARGET_STATES.txt") or ["VA"]
 
     # Team addresses — env var is pipe-separated, txt is one per line
+    # Format: "address;minutes" (minutes optional, defaults to DEFAULT_MAX_MINUTES)
     ta_env = os.getenv("TEAM_ADDRESSES", "").strip()
-    addresses = [a.strip() for a in ta_env.split("|") if a.strip()] if ta_env else []
-    if not addresses:
-        addresses = _read_txt("TEAM_ADDRESSES.txt")
+    raw_addrs = [a.strip() for a in ta_env.split("|") if a.strip()] if ta_env else []
+    if not raw_addrs:
+        raw_addrs = _read_txt("TEAM_ADDRESSES.txt")
+    team_members = [_parse_team_entry(entry) for entry in raw_addrs]
 
     # Register secrets with GitHub Actions log masking
     for wh in webhooks:
         _gh_mask(wh)
-    for addr in addresses:
+    for addr, _ in team_members:
         _gh_mask(addr)
 
-    return webhooks, states, addresses
+    return webhooks, states, team_members
 
 
 # ── logging helpers ──────────────────────────────────────────
@@ -326,7 +343,7 @@ def send_discord_alert(webhooks, show):
             {"name": "📍 Address", "value": show.get("address", "See link"), "inline": False},
             {
                 "name": "🚗 Closest Drive",
-                "value": show.get("drive_time_str", "< 2 hrs"),
+                "value": show.get("drive_time_str", "Within range"),
                 "inline": True,
             },
         ],
@@ -350,30 +367,31 @@ def send_discord_alert(webhooks, show):
 
 # ── main ─────────────────────────────────────────────────────
 def main():
-    webhooks, states, team_addresses = load_config()
+    webhooks, states, team_members = load_config()
 
     print("=" * 60)
     print("  Card Show Finder")
     print("=" * 60)
     print(f"  States       : {', '.join(states)}")
-    print(f"  Team addrs   : {len(team_addresses)}")
+    print(f"  Team members : {len(team_members)}")
     print(f"  Webhooks     : {len(webhooks)}")
     print()
 
     if not webhooks:
         print("⚠️  No Discord webhooks configured — results will only be logged.")
-    if not team_addresses:
+    if not team_members:
         print("❌ No team addresses configured. Cannot calculate distances.")
         sys.exit(1)
 
     # ── geocode team members ──
     print("📍 Geocoding team member addresses …")
-    team_coords = []
-    for addr in team_addresses:
-        print(f"  → {_mask_address(addr)}")
+    team_coords = []   # list of (coords, max_seconds)
+    for addr, max_secs in team_members:
+        max_mins = max_secs / 60
+        print(f"  → {_mask_address(addr)} (max {max_mins:g} min)")
         coords = geocode(addr, quiet=True)
         if coords:
-            team_coords.append(coords)
+            team_coords.append((coords, max_secs))
         else:
             print(f"    ⚠️  FAILED — skipping this address")
         time.sleep(NOMINATIM_DELAY)
@@ -381,7 +399,7 @@ def main():
     if not team_coords:
         print("❌ CRITICAL: No team addresses could be geocoded. Exiting.")
         sys.exit(1)
-    print(f"  ✅ {len(team_coords)}/{len(team_addresses)} addresses geocoded\n")
+    print(f"  ✅ {len(team_coords)}/{len(team_members)} addresses geocoded\n")
 
     # ── load seen IDs ──
     seen_ids = set(_read_txt(SEEN_FILE))
@@ -448,25 +466,28 @@ def main():
                 continue
 
             # ── check drive time from each team member ──
-            min_drive = float("inf")
-            for tc in team_coords:
+            best_drive = float("inf")
+            in_range = False
+            for tc, member_max in team_coords:
                 dt = get_driving_seconds(tc, show_coords)
-                if dt < min_drive:
-                    min_drive = dt
+                if dt < best_drive:
+                    best_drive = dt
+                if dt <= member_max:
+                    in_range = True
                 time.sleep(0.5)          # be nice to OSRM
 
-            if min_drive <= MAX_TRAVEL_SECONDS:
-                hrs = min_drive / 3600
+            if in_range:
+                hrs = best_drive / 3600
                 show["drive_time_str"] = f"~{hrs:.1f} hrs"
                 print(f"     ✅ WITHIN RANGE — {show['drive_time_str']}")
                 new_alerts += 1
                 if webhooks:
                     send_discord_alert(webhooks, show)
             else:
-                if min_drive == float("inf"):
+                if best_drive == float("inf"):
                     print("     ⏭️  Could not calculate drive time")
                 else:
-                    print(f"     ⏭️  Out of range ({min_drive/3600:.1f} hrs)")
+                    print(f"     ⏭️  Out of range ({best_drive/3600:.1f} hrs)")
 
     # ── summary ──
     print(f"\n{'='*60}")
