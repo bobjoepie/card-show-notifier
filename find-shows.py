@@ -19,32 +19,38 @@ scraper = cloudscraper.create_scraper()
 import urllib.parse
 
 def get_coords(address):
-    """Converts text address to Lat/Lon with strict encoding."""
-    # Clean the address of any hidden newlines or tabs
+    """Converts text address to Lat/Lon. Slims down the address if the first attempt fails."""
+    # Clean standard junk
     clean_addr = address.replace("United States", "").strip().replace("\n", " ").replace("\r", "")
     
-    # URL encode the address (turns spaces into %20, etc.)
-    encoded_addr = urllib.parse.quote(clean_addr)
-    
+    # Try 1: The full address (Building + Street + City)
+    coords = call_nominatim(clean_addr)
+    if coords:
+        return coords
+
+    # Try 2: If Try 1 fails, strip out common building names and try just the Street/City
+    # We look for the first number (the street number) and start from there
+    match = re.search(r'\d+', clean_addr)
+    if match:
+        slim_addr = clean_addr[match.start():]
+        print(f"🔄 Retrying with slim address: {slim_addr}")
+        return call_nominatim(slim_addr)
+        
+    return None
+
+def call_nominatim(query):
+    """Internal helper to hit the Map API"""
+    import urllib.parse
+    encoded_addr = urllib.parse.quote(query)
+    url = f"https://nominatim.openstreetmap.org/search?q={encoded_addr}&format=json&limit=1"
+    headers = {'User-Agent': 'CardShowBot/1.0'}
     try:
-        url = f"https://nominatim.openstreetmap.org/search?q={encoded_addr}&format=json&limit=1"
-        
-        # Use a very specific User-Agent as required by Nominatim's Policy
-        headers = {
-            'User-Agent': 'CardShowBot/1.0 (contact: your-github-username)' 
-        }
-        
         res = requests.get(url, headers=headers, timeout=10).json()
-        
         if res:
-            print(f"✅ Found Coords for: {clean_addr}")
             return (res[0]['lon'], res[0]['lat'])
-        else:
-            print(f"⚠️ Map API returned no results for: [{clean_addr}]")
-            return None
-    except Exception as e:
-        print(f"❌ Geocoding error: {e}")
-        return None
+    except:
+        pass
+    return None
 
 def get_travel_time(start_coords, end_coords):
     """Calculates driving duration via OSRM public API"""
