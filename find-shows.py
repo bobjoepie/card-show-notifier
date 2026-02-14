@@ -74,7 +74,35 @@ def load_config():
     if not addresses:
         addresses = _read_txt("TEAM_ADDRESSES.txt")
 
+    # Register secrets with GitHub Actions log masking
+    for wh in webhooks:
+        _gh_mask(wh)
+    for addr in addresses:
+        _gh_mask(addr)
+
     return webhooks, states, addresses
+
+
+# ── logging helpers ──────────────────────────────────────────
+def _mask(text, show_chars=8):
+    """Mask sensitive text for safe logging. Shows last `show_chars` chars."""
+    if len(text) <= show_chars:
+        return "****"
+    return f"****{text[-show_chars:]}"
+
+
+def _mask_address(addr):
+    """Show only city/state from an address for logging."""
+    parts = [p.strip() for p in addr.split(",")]
+    if len(parts) >= 2:
+        return f"****{parts[-2]}, {parts[-1]}"
+    return "****"
+
+
+def _gh_mask(secret):
+    """Tell GitHub Actions to mask a value in all future log output."""
+    if os.getenv("GITHUB_ACTIONS"):
+        print(f"::add-mask::{secret}")
 
 
 # ── HTTP helper ──────────────────────────────────────────────
@@ -108,10 +136,11 @@ def _nominatim_lookup(query):
     return None
 
 
-def geocode(address):
+def geocode(address, quiet=False):
     """
     Try progressively simpler address strings until Nominatim returns
     a result.  Returns (lon, lat) or None.
+    Set quiet=True to suppress address/coordinate logging (for personal addresses).
     """
     clean = re.sub(r"\s+", " ", address.replace("\n", " ").replace("\r", "")).strip()
     clean = re.sub(r",?\s*United States\s*$", "", clean).strip()
@@ -131,11 +160,17 @@ def geocode(address):
     for attempt in attempts:
         coords = _nominatim_lookup(attempt)
         if coords:
-            print(f"    📍 Geocoded: {attempt}  →  ({coords[1]:.4f}, {coords[0]:.4f})")
+            if quiet:
+                print(f"    📍 Geocoded successfully")
+            else:
+                print(f"    📍 Geocoded: {attempt}  →  ({coords[1]:.4f}, {coords[0]:.4f})")
             return coords
         time.sleep(NOMINATIM_DELAY)
 
-    print(f"    ⚠️  Could not geocode: {clean}")
+    if quiet:
+        print(f"    ⚠️  Could not geocode address")
+    else:
+        print(f"    ⚠️  Could not geocode: {clean}")
     return None
 
 
@@ -307,9 +342,9 @@ def send_discord_alert(webhooks, show):
             if r.status_code < 300:
                 print(f"    ✅ Discord notified!")
             else:
-                print(f"    ❌ Discord error ({r.status_code}): {r.text}")
+                print(f"    ❌ Discord error ({r.status_code}) on webhook {_mask(wh)}")
         except Exception as e:
-            print(f"    ❌ Discord exception: {e}")
+            print(f"    ❌ Discord exception on webhook {_mask(wh)}: {e}")
         time.sleep(0.5)
 
 
@@ -335,8 +370,8 @@ def main():
     print("📍 Geocoding team member addresses …")
     team_coords = []
     for addr in team_addresses:
-        print(f"  → {addr}")
-        coords = geocode(addr)
+        print(f"  → {_mask_address(addr)}")
+        coords = geocode(addr, quiet=True)
         if coords:
             team_coords.append(coords)
         else:
