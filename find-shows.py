@@ -9,7 +9,7 @@ import sys
 # 1. Configuration & Secrets
 WEBHOOKS = [url.strip() for url in os.getenv("DISCORD_WEBHOOKS", "").split(",") if url.strip()]
 STATES = [s.strip() for s in os.getenv("TARGET_STATES", "VA").split(",") if s.strip()]
-TEAM_ADDRESSES = [a.strip() for a in os.getenv("TEAM_ADDRESSES", "").split(",") if a.strip()]
+TEAM_ADDRESSES = [a.strip() for a in os.getenv("TEAM_ADDRESSES", "").split("|") if a.strip()]
 SEEN_FILE = "seen_ids.txt"
 MAX_TRAVEL_TIME = 7200 # 2 hours in seconds
 
