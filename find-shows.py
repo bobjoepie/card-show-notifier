@@ -5,51 +5,52 @@ import requests
 import time
 import re
 import sys
+import urllib.parse
 
 # 1. Configuration & Secrets
 WEBHOOKS = [url.strip() for url in os.getenv("DISCORD_WEBHOOKS", "").split(",") if url.strip()]
 STATES = [s.strip() for s in os.getenv("TARGET_STATES", "VA").split(",") if s.strip()]
-# CHANGED: Now splitting by Pipe (|) to allow commas inside addresses
 TEAM_ADDRESSES = [a.strip() for a in os.getenv("TEAM_ADDRESSES", "").split("|") if a.strip()]
 SEEN_FILE = "seen_ids.txt"
 MAX_TRAVEL_TIME = 7200 # 2 hours in seconds
 
 scraper = cloudscraper.create_scraper()
 
-import urllib.parse
+def call_nominatim(query):
+    """Helper to hit the Map API with proper encoding and headers"""
+    encoded_addr = urllib.parse.quote(query)
+    url = f"https://nominatim.openstreetmap.org/search?q={encoded_addr}&format=json&limit=1"
+    headers = {'User-Agent': 'CardShowBot/1.0 (Contact: YourGitHubUser)'}
+    try:
+        res = requests.get(url, headers=headers, timeout=10).json()
+        return (res[0]['lon'], res[0]['lat']) if res else None
+    except:
+        return None
 
 def get_coords(address):
-    """Converts text address to Lat/Lon. Slims down the address if the first attempt fails."""
-    # Clean standard junk
+    """Aggressively tries to find coordinates by slimming down the address."""
     clean_addr = address.replace("United States", "").strip().replace("\n", " ").replace("\r", "")
     
-    # Try 1: The full address (Building + Street + City)
+    # Try 1: Full Address
     coords = call_nominatim(clean_addr)
-    if coords:
-        return coords
+    if coords: return coords
 
-    # Try 2: If Try 1 fails, strip out common building names and try just the Street/City
-    # We look for the first number (the street number) and start from there
+    # Try 2: Start from the first number (Street Number)
     match = re.search(r'\d+', clean_addr)
     if match:
         slim_addr = clean_addr[match.start():]
-        print(f"🔄 Retrying with slim address: {slim_addr}")
-        return call_nominatim(slim_addr)
-        
-    return None
+        print(f"🔄 Retrying with street: {slim_addr}")
+        coords = call_nominatim(slim_addr)
+        if coords: return coords
 
-def call_nominatim(query):
-    """Internal helper to hit the Map API"""
-    import urllib.parse
-    encoded_addr = urllib.parse.quote(query)
-    url = f"https://nominatim.openstreetmap.org/search?q={encoded_addr}&format=json&limit=1"
-    headers = {'User-Agent': 'CardShowBot/1.0'}
-    try:
-        res = requests.get(url, headers=headers, timeout=10).json()
-        if res:
-            return (res[0]['lon'], res[0]['lat'])
-    except:
-        pass
+    # Try 3: Last Resort - Just City, State, Zip
+    # We look for the last comma and take everything after it
+    parts = clean_addr.split(',')
+    if len(parts) >= 2:
+        city_zip = f"{parts[-2].strip()}, {parts[-1].strip()}"
+        print(f"📍 Last resort (City/Zip): {city_zip}")
+        return call_nominatim(city_zip)
+        
     return None
 
 def get_travel_time(start_coords, end_coords):
@@ -58,33 +59,21 @@ def get_travel_time(start_coords, end_coords):
         url = f"http://router.project-osrm.org/route/v1/driving/{start_coords[0]},{start_coords[1]};{end_coords[0]},{end_coords[1]}?overview=false"
         res = requests.get(url, timeout=10).json()
         return res['routes'][0]['duration'] if 'routes' in res else float('inf')
-    except Exception as e:
-        print(f"OSRM error: {e}")
+    except:
         return float('inf')
 
 # --- INITIALIZATION ---
-
 print("Geocoding team addresses...")
-team_coords = []
-for addr in TEAM_ADDRESSES:
-    coords = get_coords(addr)
-    if not coords:
-        # If this fails, it prints exactly what it tried to find
-        print(f"❌ CRITICAL: Could not find your address: {addr}")
-        sys.exit(1)
-    team_coords.append(coords)
-    time.sleep(1)
+team_coords = [get_coords(a) for a in TEAM_ADDRESSES if get_coords(a)]
+if not team_coords:
+    print(f"❌ CRITICAL: Could not find any team addresses. Check your secret.")
+    sys.exit(1)
 
-if os.path.exists(SEEN_FILE):
-    with open(SEEN_FILE, "r") as f:
-        seen_ids = set(f.read().splitlines())
-else:
-    seen_ids = set()
+seen_ids = set(open(SEEN_FILE).read().splitlines()) if os.path.exists(SEEN_FILE) else set()
 
 # --- MAIN LOOP ---
-
 for state in STATES:
-    print(f"\n--- Checking {state} ---")
+    print(f"\n--- Checking {state} (Team: {len(team_coords)} locations) ---")
     list_url = f"https://www.tcdb.com/CardShows.cfm?MODE=Location&State={state}&Country=United%20States"
     
     try:
@@ -94,18 +83,14 @@ for state in STATES:
         for link in soup.find_all('a', href=True):
             if "ID=" in link['href']:
                 show_id = link['href'].split("ID=")[-1]
-                
-                if show_id in seen_ids:
-                    continue
+                if show_id in seen_ids: continue
 
                 show_url = f"https://www.tcdb.com/{link['href']}"
                 print(f"Processing Show {show_id}...")
                 
                 detail_res = scraper.get(show_url)
-                detail_soup = BeautifulSoup(detail_res.text, 'html.parser')
-                p_tags = detail_soup.find_all('p')
+                p_tags = BeautifulSoup(detail_res.text, 'html.parser').find_all('p')
 
-                # Using Position Index: Date is p[0], Address is p[1]
                 if len(p_tags) > 1:
                     show_date = p_tags[0].get_text(strip=True)
                     show_address = p_tags[1].get_text(separator=" ", strip=True)
@@ -117,21 +102,21 @@ for state in STATES:
                             in_range = any(get_travel_time(tc, show_coords) <= MAX_TRAVEL_TIME for tc in team_coords)
                             
                             if in_range:
-                                msg = f"🏎️ **New Show Alert!**\n**{link.text}**\n📅 {show_date}\n📍 {show_address}\n🔗 {show_url}"
+                                payload = {"content": f"🏎️ **New Show Alert!**\n**{link.text}**\n📅 {show_date}\n📍 {show_address}\n🔗 {show_url}"}
                                 for wh in WEBHOOKS:
-                                    requests.post(wh, json={"content": msg})
-                                print(f"✅ Notified for {show_id}")
+                                    r = requests.post(wh, json=payload)
+                                    if r.status_code >= 300:
+                                        print(f"❌ Discord Error ({r.status_code}): {r.text}")
+                                    else:
+                                        print(f"✅ Notified for {show_id}")
                             else:
                                 print(f"⏭️ {show_id} is outside range.")
                         else:
-                            print(f"🛑 Geocoder failed on show {show_id}")
-                            sys.exit(1)
+                            print(f"⚠️ Skipping {show_id}: Address could not be geocoded.")
                     
-                    with open(SEEN_FILE, "a") as f:
-                        f.write(f"{show_id}\n")
+                    with open(SEEN_FILE, "a") as f: f.write(f"{show_id}\n")
                     seen_ids.add(show_id)
                     time.sleep(2)
-
     except Exception as e:
         print(f"Error on {state}: {e}")
 
