@@ -1,0 +1,42 @@
+name: Daily Card Show Scraper
+
+on:
+  schedule:
+    # This runs every day at 1:00 PM UTC (8:00 AM EST)
+    - cron: '0 13 * * *'
+  # This lets you run it manually from the "Actions" tab to test it
+  workflow_dispatch:
+
+jobs:
+  run-scraper:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run find-shows.py
+        env:
+          # This connects your GitHub Secrets to the script
+          DISCORD_WEBHOOKS: ${{ secrets.DISCORD_WEBHOOKS }}
+          TARGET_STATES: ${{ secrets.TARGET_STATES }}
+          TEAM_ADDRESSES: ${{ secrets.TEAM_ADDRESSES }}
+        run: python find-shows.py
+
+      - name: Save progress (Update seen_ids.txt)
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add seen_ids.txt
+          # Only commit if there are actually new shows found
+          git commit -m "Update seen show IDs" || echo "No new shows to save"
+          git push
