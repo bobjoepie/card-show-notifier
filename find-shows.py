@@ -15,6 +15,7 @@ import sys
 import time
 import json
 import urllib.parse
+from datetime import date, timedelta
 
 # Fix emoji output on Windows terminals (cp1252 doesn't support them)
 if sys.stdout.encoding and sys.stdout.encoding.lower().startswith("cp"):
@@ -35,13 +36,17 @@ except ImportError:
     cloudscraper = None
 
 # ── constants ────────────────────────────────────────────────
-SEEN_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "seen_ids.txt")
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+SEEN_FILE = os.path.join(SCRIPT_DIR, "seen_ids.txt")
+SEEN_TREASURE_FILE = os.path.join(SCRIPT_DIR, "seen_treasure_urls.txt")
 DEFAULT_MAX_MINUTES = 120          # used when no ;minutes suffix given
 REQUEST_DELAY = 2                  # polite delay between TCDB page loads
 NOMINATIM_DELAY = 1.1              # Nominatim ToS: max 1 req/s
 USER_AGENT = "CardShowBot/1.0 (github-action-card-show-finder)"
 BASE_URL = "https://www.tcdb.com"
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+TREASURE_BASE_URL = "https://www.ontreasure.com"
+TREASURE_WINDOW_DAYS = 7           # span per request (e.g., 04-01..04-08)
+TREASURE_NUM_WINDOWS = 16          # ~4 months of weekly windows
 
 
 # ── configuration ────────────────────────────────────────────
@@ -330,6 +335,155 @@ def parse_detail_page(html):
     return None
 
 
+# ── Treasure (ontreasure.com) scraping ───────────────────────
+# Events are embedded in Next.js RSC stream as escaped JSON inside JS string
+# literals, e.g.: \"events\":[{\"id\":\"...\",\"name\":\"...\",\"lat\":..,\"lng\":..,\n# \"min_date\":\"YYYY-MM-DD\",\"max_date\":\"YYYY-MM-DD\",\"city\":\"...\",\n# \"state\":\"VA\",\"cleaned_name\":\"...\"}].
+TREASURE_EVENT_RE = re.compile(
+    r'\\"id\\":\\"(?P<id>[0-9a-fA-F-]{36})\\"'
+    r',\\"name\\":\\"(?P<name>(?:[^"\\]|\\.)*?)\\"'
+    r'.*?\\"lat\\":(?P<lat>-?\d+(?:\.\d+)?)'
+    r',\\"lng\\":(?P<lng>-?\d+(?:\.\d+)?)'
+    r',\\"min_date\\":\\"(?P<min_date>\d{4}-\d{2}-\d{2})\\"'
+    r',\\"max_date\\":\\"(?P<max_date>\d{4}-\d{2}-\d{2})\\"'
+    r',\\"city\\":\\"(?P<city>(?:[^"\\]|\\.)*?)\\"'
+    r',\\"state\\":\\"(?P<state>[A-Z]{2})\\"'
+    r',\\"cleaned_name\\":\\"(?P<cleaned>[^"\\]+)\\"',
+    re.DOTALL,
+)
+
+
+def _unescape_js_string(s):
+    """Decode the simple JS-string escapes used in Next.js RSC payloads."""
+    # json.loads handles \", \\, \n, \uXXXX, etc.
+    try:
+        return json.loads(f'"{s}"')
+    except Exception:
+        return s.replace('\\"', '"').replace("\\\\", "\\")
+
+
+def parse_treasure_events(html):
+    """Extract event dicts from a Treasure /events listing page."""
+    events = []
+    for m in TREASURE_EVENT_RE.finditer(html):
+        cleaned = m.group("cleaned")
+        events.append(
+            {
+                "id": m.group("id"),
+                "name": _unescape_js_string(m.group("name")),
+                "lat": float(m.group("lat")),
+                "lng": float(m.group("lng")),
+                "min_date": m.group("min_date"),
+                "max_date": m.group("max_date"),
+                "city": _unescape_js_string(m.group("city")),
+                "state": m.group("state"),
+                "cleaned_name": cleaned,
+                "url": f"{TREASURE_BASE_URL}/events/{cleaned}",
+            }
+        )
+    return events
+
+
+def _format_treasure_date(min_d, max_d):
+    """Format an event date range for display."""
+    if min_d == max_d:
+        return min_d
+    return f"{min_d} → {max_d}"
+
+
+def scrape_treasure(scraper, states, team_coords, webhooks, seen_urls):
+    """
+    Scrape ontreasure.com for card shows in `states` over the next
+    TREASURE_NUM_WINDOWS weekly windows. Sends Discord alerts for any
+    new event within driving range of any team member.
+
+    Returns the number of in-range alerts sent.
+    """
+    if not states:
+        return 0
+
+    states_param = "-".join(states)
+    today = date.today()
+    new_alerts = 0
+    seen_in_run = set()  # avoid re-processing same event across overlapping fetches
+
+    print(f"\n{'═'*60}")
+    print(f"  Treasure (ontreasure.com)")
+    print(f"{'═'*60}")
+    print(f"  States  : {states_param}")
+    print(f"  Windows : {TREASURE_NUM_WINDOWS} × {TREASURE_WINDOW_DAYS}-day spans")
+
+    for i in range(TREASURE_NUM_WINDOWS):
+        frm = today + timedelta(days=i * (TREASURE_WINDOW_DAYS + 1))
+        until = frm + timedelta(days=TREASURE_WINDOW_DAYS)
+        url = (
+            f"{TREASURE_BASE_URL}/events"
+            f"?states={states_param}&from={frm.isoformat()}&until={until.isoformat()}"
+        )
+        print(f"\n  🔍 [{i+1}/{TREASURE_NUM_WINDOWS}] {frm} → {until}")
+
+        try:
+            resp = scraper.get(url, timeout=30)
+            resp.raise_for_status()
+        except Exception as e:
+            print(f"    ❌ Fetch error: {e}")
+            time.sleep(REQUEST_DELAY)
+            continue
+
+        events = parse_treasure_events(resp.text)
+        print(f"    📄 {len(events)} event(s) found")
+
+        for ev in events:
+            ev_url = ev["url"]
+            if ev_url in seen_urls or ev_url in seen_in_run:
+                continue
+            seen_in_run.add(ev_url)
+
+            print(f"\n    🆕 {ev['name']}")
+            print(f"       {_format_treasure_date(ev['min_date'], ev['max_date'])}  "
+                  f"— {ev['city']}, {ev['state']}")
+
+            # Mark seen immediately so we don't re-process on failure
+            seen_urls.add(ev_url)
+            with open(SEEN_TREASURE_FILE, "a", encoding="utf-8") as f:
+                f.write(f"{ev_url}\n")
+
+            show_coords = (ev["lng"], ev["lat"])  # OSRM expects (lon, lat)
+
+            best_drive = float("inf")
+            in_range = False
+            for tc, member_max in team_coords:
+                dt = get_driving_seconds(tc, show_coords)
+                if dt < best_drive:
+                    best_drive = dt
+                if dt <= member_max:
+                    in_range = True
+                time.sleep(0.5)
+
+            if in_range:
+                hrs = best_drive / 3600
+                alert = {
+                    "name": ev["name"],
+                    "url": ev_url,
+                    "date": _format_treasure_date(ev["min_date"], ev["max_date"]),
+                    "time": "See event page",
+                    "address": f"{ev['city']}, {ev['state']}",
+                    "drive_time_str": f"~{hrs:.1f} hrs",
+                }
+                print(f"       ✅ WITHIN RANGE (~{hrs:.1f} hrs)")
+                new_alerts += 1
+                if webhooks:
+                    send_discord_alert(webhooks, alert)
+            elif best_drive == float("inf"):
+                print("       ⏭️  Could not calculate drive time")
+            else:
+                hrs = best_drive / 3600
+                print(f"       ⏭️  Out of range (~{hrs:.1f} hrs)")
+
+        time.sleep(REQUEST_DELAY)
+
+    return new_alerts
+
+
 # ── Discord ──────────────────────────────────────────────────
 def send_discord_alert(webhooks, show):
     """Post a rich-embed card-show alert to each Discord webhook."""
@@ -402,7 +556,9 @@ def main():
 
     # ── load seen IDs ──
     seen_ids = set(_read_txt(SEEN_FILE))
-    print(f"📋 {len(seen_ids)} previously seen show IDs\n")
+    seen_treasure_urls = set(_read_txt(SEEN_TREASURE_FILE))
+    print(f"📋 {len(seen_ids)} previously seen TCDB show IDs")
+    print(f"📋 {len(seen_treasure_urls)} previously seen Treasure event URLs\n")
 
     scraper = make_scraper()
     new_alerts = 0
@@ -487,6 +643,12 @@ def main():
                     print("     ⏭️  Could not calculate drive time")
                 else:
                     print(f"     ⏭️  Out of range")
+
+    # ── Treasure (ontreasure.com) ──
+    treasure_alerts = scrape_treasure(
+        scraper, states, team_coords, webhooks, seen_treasure_urls
+    )
+    new_alerts += treasure_alerts
 
     # ── summary ──
     print(f"\n{'='*60}")
