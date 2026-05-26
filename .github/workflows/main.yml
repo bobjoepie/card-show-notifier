@@ -1,9 +1,9 @@
 name: Daily Card Show Scraper
 
 on:
-  schedule:
-    # This runs every 4 hours at the start of the hour
-    - cron : '0 */4 * * *'
+schedule:
+    # Runs every 2 hours from 9 AM to 11 PM EST (14:00 to 04:00 UTC)
+    - cron: '0 14-23/2,0-4/2 * * *'
   # This lets you run it manually from the "Actions" tab to test it
   workflow_dispatch:
 
